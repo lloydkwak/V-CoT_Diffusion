@@ -1,0 +1,29 @@
+name: vcot
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  # Core Python version (3.10 is stable for both Diffusers and Robotics)
+  - python=3.10
+  - pip
+
+  # System-level build tools and libraries
+  - cmake
+  - make
+  - gcc_linux-64
+  - gxx_linux-64
+  
+  # Video processing (Essential for processing robotic vision data)
+  - ffmpeg
+  - x264
+  
+  # Graphics and Rendering (Required for MuJoCo/OpenGL)
+  - mesalib
+  - glew
+  - patchelf
+
+  # Jupyter for interactive analysis
+  - jupyter
+  - notebook

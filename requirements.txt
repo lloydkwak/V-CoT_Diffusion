@@ -1,0 +1,53 @@
+# --- Core PyTorch & CUDA 12.1 ---
+# Using the official PyTorch wheel with CUDA 12.1 support
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch>=2.3.0
+torchvision>=0.18.0
+torchaudio>=2.3.0
+
+# --- V-CoT Module (High-level Reasoning) ---
+# Libraries for Latent Diffusion, VLM, and Image Editing (InstructPix2Pix, etc.)
+diffusers[torch]
+transformers
+accelerate
+peft                # For LoRA fine-tuning
+bitsandbytes        # For 8-bit/4-bit quantization (memory efficiency)
+sentencepiece       # Tokenizer required for many VLMs
+protobuf
+
+# --- Diffusion Policy Module (Low-level Control) ---
+# Core libraries for the Stanford diffusion_policy submodule
+dill
+hydra-core>=1.2
+omegaconf
+zarr                # High-performance chunked data storage
+numcodecs
+wandb               # Experiment tracking
+einops              # Tensor manipulation
+tqdm
+termcolor
+scikit-image
+scikit-learn
+shapely
+networkx
+
+# --- Simulation & Robotics ---
+# Libraries for physics simulation and robot data handling
+mujoco>=3.1.0       # New official MuJoCo bindings
+dm_control>=1.0.14
+robosuite           # Robot simulation environment
+robomimic           # For data processing and baselines
+gym==0.26.2         # Standard RL interface
+gymnasium           # Newer standard (some libs use this now)
+
+# --- Data Visualization & Utilities ---
+matplotlib
+seaborn
+imageio[ffmpeg]     # Video I/O
+opencv-python
+h5py
+numba               # JIT compiler for fast math operations
+
+# --- Legacy Compatibility ---
+# Pinning numpy < 2.0 to prevent ABI issues with older robotics libraries
+numpy<2.0.0
