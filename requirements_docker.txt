@@ -1,0 +1,5 @@
+numpy<2.0.0
+h5py
+imageio[ffmpeg]
+tqdm
+robomimic
