@@ -15,6 +15,7 @@ RUN mkdir -p /root/.mujoco \
 ENV LD_LIBRARY_PATH="/root/.mujoco/mujoco210/bin:${LD_LIBRARY_PATH}"
 ENV MUJOCO_PY_MUJOCO_PATH="/root/.mujoco/mujoco210"
 ENV PYOPENGL_PLATFORM="osmesa"
+ENV MUJOCO_GL="osmesa"
 
 WORKDIR /workspace
 COPY requirements_docker.txt .

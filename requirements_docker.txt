@@ -3,3 +3,4 @@ h5py
 imageio[ffmpeg]
 tqdm
 robomimic
+robosuite==1.4.1
