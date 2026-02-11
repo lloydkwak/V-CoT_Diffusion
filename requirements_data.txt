@@ -1,0 +1,10 @@
+# --- Data Preprocessing Environment (vcot_data) ---
+# Separate environment to handle TensorFlow-based datasets (DROID/OXE/RLDS)
+# without conflicting with the main PyTorch training environment.
+
+tensorflow>=2.15.0  # For reading TFRecords/RLDS
+numpy<2.0.0         # Compatibility with robotics libs
+h5py                # For saving converted data
+imageio[ffmpeg]     # For video processing
+tqdm                # Progress bars
+gsutil              # For downloading from Google Cloud Buckets
