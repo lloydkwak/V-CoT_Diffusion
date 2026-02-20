@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Union, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,48 +7,56 @@ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
 from diffusion_policy.model.common.normalizer import LinearNormalizer
 from diffusion_policy.policy.base_image_policy import BaseImagePolicy
-from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
 from diffusion_policy.model.diffusion.mask_generator import LowdimMaskGenerator
-from diffusion_policy.model.vision.multi_image_obs_encoder import MultiImageObsEncoder
 from diffusion_policy.common.pytorch_util import dict_apply
 
-class DiffusionUnetImagePolicy(BaseImagePolicy):
+# Import our custom modules
+from v_cot.models.vision_encoder import VCoTVisionEncoder
+from v_cot.models.modified_unet import ModifiedConditionalUnet1D
+
+class VCoTPolicy(BaseImagePolicy):
     def __init__(self, 
             shape_meta: dict,
             noise_scheduler: DDPMScheduler,
-            obs_encoder: MultiImageObsEncoder,
-            horizon, 
-            n_action_steps, 
-            n_obs_steps,
+            obs_encoder: VCoTVisionEncoder,
+            horizon: int, 
+            n_action_steps: int, 
+            n_obs_steps: int,
             num_inference_steps=None,
             obs_as_global_cond=True,
             diffusion_step_embed_dim=256,
-            down_dims=(256,512,1024),
+            down_dims=(256, 512, 1024),
             kernel_size=5,
             n_groups=8,
             cond_predict_scale=True,
-            # parameters passed to step
+            use_cross_attn=True,
             **kwargs):
+        """
+        V-CoT Policy: Integrates Spatial Subgoal Reasoning into Diffusion Policy.
+        """
         super().__init__()
 
-        # parse shapes
+        # 1. Setup Action Dimensions
         action_shape = shape_meta['action']['shape']
-        assert len(action_shape) == 1
         action_dim = action_shape[0]
-        # get feature dim
-        obs_feature_dim = obs_encoder.output_shape()[0]
 
-        # create diffusion model
-        input_dim = action_dim + obs_feature_dim
-        global_cond_dim = None
-        if obs_as_global_cond:
-            input_dim = action_dim
-            global_cond_dim = obs_feature_dim * n_obs_steps
+        # 2. Get Feature Dimensions from VCoTVisionEncoder
+        # Encoder returns a dict with 'global_feat' and 'spatial_feats'
+        out_shapes = obs_encoder.output_shape()
+        global_feature_dim = out_shapes['global_feat'][0]
+        # Assume subgoal feature dim is the last channel of spatial maps
+        subgoal_feat_dim = list(out_shapes['spatial_feats'].values())[0][-1]
 
-        model = ConditionalUnet1D(
+        # 3. Initialize Modified 1D U-Net
+        input_dim = action_dim
+        global_cond_dim = global_feature_dim * n_obs_steps
+
+        self.model = ModifiedConditionalUnet1D(
             input_dim=input_dim,
             local_cond_dim=None,
             global_cond_dim=global_cond_dim,
+            subgoal_feat_dim=subgoal_feat_dim,
+            use_cross_attn=use_cross_attn,
             diffusion_step_embed_dim=diffusion_step_embed_dim,
             down_dims=down_dims,
             kernel_size=kernel_size,
@@ -57,203 +65,113 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
         )
 
         self.obs_encoder = obs_encoder
-        self.model = model
         self.noise_scheduler = noise_scheduler
-        self.mask_generator = LowdimMaskGenerator(
-            action_dim=action_dim,
-            obs_dim=0 if obs_as_global_cond else obs_feature_dim,
-            max_n_obs_steps=n_obs_steps,
-            fix_obs_steps=True,
-            action_visible=False
-        )
         self.normalizer = LinearNormalizer()
         self.horizon = horizon
-        self.obs_feature_dim = obs_feature_dim
         self.action_dim = action_dim
         self.n_action_steps = n_action_steps
         self.n_obs_steps = n_obs_steps
         self.obs_as_global_cond = obs_as_global_cond
+        
+        self.num_inference_steps = num_inference_steps if num_inference_steps else noise_scheduler.config.num_train_timesteps
         self.kwargs = kwargs
 
-        if num_inference_steps is None:
-            num_inference_steps = noise_scheduler.config.num_train_timesteps
-        self.num_inference_steps = num_inference_steps
-    
-    # ========= inference  ============
+    # ========= Inference Core ============
     def conditional_sample(self, 
             condition_data, condition_mask,
-            local_cond=None, global_cond=None,
-            generator=None,
-            # keyword arguments to scheduler.step
-            **kwargs
-            ):
-        model = self.model
-        scheduler = self.noise_scheduler
-
-        trajectory = torch.randn(
-            size=condition_data.shape, 
-            dtype=condition_data.dtype,
-            device=condition_data.device,
-            generator=generator)
-    
-        # set step values
-        scheduler.set_timesteps(self.num_inference_steps)
-
-        for t in scheduler.timesteps:
-            # 1. apply conditioning
-            trajectory[condition_mask] = condition_data[condition_mask]
-
-            # 2. predict model output
-            model_output = model(trajectory, t, 
-                local_cond=local_cond, global_cond=global_cond)
-
-            # 3. compute previous image: x_t -> x_t-1
-            trajectory = scheduler.step(
-                model_output, t, trajectory, 
-                generator=generator,
-                **kwargs
-                ).prev_sample
+            global_cond=None, subgoal_spatial_feat=None,
+            generator=None, **kwargs):
         
-        # finally make sure conditioning is enforced
-        trajectory[condition_mask] = condition_data[condition_mask]        
+        trajectory = torch.randn(size=condition_data.shape, device=condition_data.device, generator=generator)
+        self.noise_scheduler.set_timesteps(self.num_inference_steps)
 
+        for t in self.noise_scheduler.timesteps:
+            trajectory[condition_mask] = condition_data[condition_mask]
+            
+            # Predict with both Global FiLM and Spatial Cross-Attention
+            model_output = self.model(
+                trajectory, t, 
+                global_cond=global_cond, 
+                subgoal_spatial_feat=subgoal_spatial_feat
+            )
+
+            trajectory = self.noise_scheduler.step(model_output, t, trajectory, generator=generator, **kwargs).prev_sample
+        
+        trajectory[condition_mask] = condition_data[condition_mask]        
         return trajectory
 
-
     def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """
-        obs_dict: must include "obs" key
-        result: must include "action" key
-        """
-        assert 'past_action' not in obs_dict # not implemented yet
-        # normalize input
         nobs = self.normalizer.normalize(obs_dict)
-        value = next(iter(nobs.values()))
-        B, To = value.shape[:2]
-        T = self.horizon
-        Da = self.action_dim
-        Do = self.obs_feature_dim
+        B = next(iter(nobs.values())).shape[0]
         To = self.n_obs_steps
 
-        # build input
-        device = self.device
-        dtype = self.dtype
+        # 1. Encode Observations
+        # Extract features for current steps
+        this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1, *x.shape[2:]))
+        out = self.obs_encoder(this_nobs)
+        
+        # Prepare Global Condition (Concatenated past observations)
+        global_cond = out['global_feat'].reshape(B, -1)
+        
+        # Extract Subgoal Spatial Map (Assume 'agentview_subgoal' key exists)
+        # Spatial map is from the last available frame in nobs
+        subgoal_spatial_feat = out['spatial_feats'].get('agentview_subgoal', None)
+        if subgoal_spatial_feat is not None:
+            # Reshape back to [B, To, N, C] and take the last frame's subgoal
+            subgoal_spatial_feat = subgoal_spatial_feat.reshape(B, To, -1, subgoal_spatial_feat.shape[-1])
+            subgoal_spatial_feat = subgoal_spatial_feat[:, -1] # [B, N, C]
 
-        # handle different ways of passing observation
-        local_cond = None
-        global_cond = None
-        if self.obs_as_global_cond:
-            # condition through global feature
-            this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]))
-            nobs_features = self.obs_encoder(this_nobs)
-            # reshape back to B, Do
-            global_cond = nobs_features.reshape(B, -1)
-            # empty data for action
-            cond_data = torch.zeros(size=(B, T, Da), device=device, dtype=dtype)
-            cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
-        else:
-            # condition through impainting
-            this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]))
-            nobs_features = self.obs_encoder(this_nobs)
-            # reshape back to B, T, Do
-            nobs_features = nobs_features.reshape(B, To, -1)
-            cond_data = torch.zeros(size=(B, T, Da+Do), device=device, dtype=dtype)
-            cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
-            cond_data[:,:To,Da:] = nobs_features
-            cond_mask[:,:To,Da:] = True
-
-        # run sampling
+        # 2. Run Diffusion Sampling
+        cond_data = torch.zeros((B, self.horizon, self.action_dim), device=self.device)
+        cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
+        
         nsample = self.conditional_sample(
-            cond_data, 
-            cond_mask,
-            local_cond=local_cond,
+            cond_data, cond_mask,
             global_cond=global_cond,
-            **self.kwargs)
+            subgoal_spatial_feat=subgoal_spatial_feat,
+            **self.kwargs
+        )
         
-        # unnormalize prediction
-        naction_pred = nsample[...,:Da]
-        action_pred = self.normalizer['action'].unnormalize(naction_pred)
-
-        # get action
+        # 3. Unnormalize and Return
+        action_pred = self.normalizer['action'].unnormalize(nsample)
         start = To - 1
-        end = start + self.n_action_steps
-        action = action_pred[:,start:end]
+        action = action_pred[:, start:start+self.n_action_steps]
         
-        result = {
-            'action': action,
-            'action_pred': action_pred
-        }
-        return result
+        return {'action': action, 'action_pred': action_pred}
 
-    # ========= training  ============
-    def set_normalizer(self, normalizer: LinearNormalizer):
-        self.normalizer.load_state_dict(normalizer.state_dict())
-
+    # ========= Training Core ============
     def compute_loss(self, batch):
-        # normalize input
-        assert 'valid_mask' not in batch
+        # 1. Normalize and Encode
         nobs = self.normalizer.normalize(batch['obs'])
         nactions = self.normalizer['action'].normalize(batch['action'])
-        batch_size = nactions.shape[0]
-        horizon = nactions.shape[1]
+        B = nactions.shape[0]
 
-        # handle different ways of passing observation
-        local_cond = None
-        global_cond = None
-        trajectory = nactions
-        cond_data = trajectory
-        if self.obs_as_global_cond:
-            # reshape B, T, ... to B*T
-            this_nobs = dict_apply(nobs, 
-                lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]))
-            nobs_features = self.obs_encoder(this_nobs)
-            # reshape back to B, Do
-            global_cond = nobs_features.reshape(batch_size, -1)
-        else:
-            # reshape B, T, ... to B*T
-            this_nobs = dict_apply(nobs, lambda x: x.reshape(-1, *x.shape[2:]))
-            nobs_features = self.obs_encoder(this_nobs)
-            # reshape back to B, T, Do
-            nobs_features = nobs_features.reshape(batch_size, horizon, -1)
-            cond_data = torch.cat([nactions, nobs_features], dim=-1)
-            trajectory = cond_data.detach()
-
-        # generate impainting mask
-        condition_mask = self.mask_generator(trajectory.shape)
-
-        # Sample noise that we'll add to the images
-        noise = torch.randn(trajectory.shape, device=trajectory.device)
-        bsz = trajectory.shape[0]
-        # Sample a random timestep for each image
-        timesteps = torch.randint(
-            0, self.noise_scheduler.config.num_train_timesteps, 
-            (bsz,), device=trajectory.device
-        ).long()
-        # Add noise to the clean images according to the noise magnitude at each timestep
-        # (this is the forward diffusion process)
-        noisy_trajectory = self.noise_scheduler.add_noise(
-            trajectory, noise, timesteps)
+        this_nobs = dict_apply(nobs, lambda x: x[:, :self.n_obs_steps, ...].reshape(-1, *x.shape[2:]))
+        out = self.obs_encoder(this_nobs)
         
-        # compute loss mask
-        loss_mask = ~condition_mask
-
-        # apply conditioning
-        noisy_trajectory[condition_mask] = cond_data[condition_mask]
+        global_cond = out['global_feat'].reshape(B, -1)
         
-        # Predict the noise residual
-        pred = self.model(noisy_trajectory, timesteps, 
-            local_cond=local_cond, global_cond=global_cond)
+        # Handle Subgoal features
+        subgoal_spatial_feat = out['spatial_feats'].get('agentview_subgoal', None)
+        if subgoal_spatial_feat is not None:
+            subgoal_spatial_feat = subgoal_spatial_feat.reshape(B, self.n_obs_steps, -1, subgoal_spatial_feat.shape[-1])
+            subgoal_spatial_feat = subgoal_spatial_feat[:, -1]
 
-        pred_type = self.noise_scheduler.config.prediction_type 
-        if pred_type == 'epsilon':
-            target = noise
-        elif pred_type == 'sample':
-            target = trajectory
-        else:
-            raise ValueError(f"Unsupported prediction type {pred_type}")
+        # 2. Diffusion Forward Process
+        noise = torch.randn(nactions.shape, device=nactions.device)
+        timesteps = torch.randint(0, self.noise_scheduler.config.num_train_timesteps, (B,), device=nactions.device).long()
+        noisy_actions = self.noise_scheduler.add_noise(nactions, noise, timesteps)
 
+        # 3. Predict and Loss Calculation
+        pred = self.model(
+            noisy_actions, timesteps, 
+            global_cond=global_cond, 
+            subgoal_spatial_feat=subgoal_spatial_feat
+        )
+
+        target = noise if self.noise_scheduler.config.prediction_type == 'epsilon' else nactions
         loss = F.mse_loss(pred, target, reduction='none')
-        loss = loss * loss_mask.type(loss.dtype)
-        loss = reduce(loss, 'b ... -> b (...)', 'mean')
-        loss = loss.mean()
-        return loss
+        return reduce(loss, 'b ... -> b (...)', 'mean').mean()
+
+    def set_normalizer(self, normalizer: LinearNormalizer):
+        self.normalizer.load_state_dict(normalizer.state_dict())
