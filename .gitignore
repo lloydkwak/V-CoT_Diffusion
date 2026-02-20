@@ -24,18 +24,19 @@ wheels/
 # Jupyter Notebooks
 .ipynb_checkpoints
 
-# Virtual Environment
+# Virtual Environment & Secrets
 venv/
 .env
 .venv/
 conda_env/
+.netrc           
 
 # IDE settings
 .vscode/
 .idea/
 *.swp
 
-# Project Specific: Data & Large Files
+# Project Specific: Data & Large Files (Heavy)
 data/
 datasets/
 *.pkl
@@ -44,17 +45,19 @@ datasets/
 *.zarr
 *.npz
 
-# Project Specific: Experiments & Logs
+# Project Specific: Experiments, Logs & ML Artifacts
 experiments/outputs/
-wandb/
+wandb/           
+artifacts/       
 runs/
 *.log
 *.pth
 *.ckpt
 *.safetensors
+*.onnx
 
 # Mac OS specific
 .DS_Store
 
-# Ignore local config overrides (optional)
+# Ignore local config overrides
 local_config.yaml
