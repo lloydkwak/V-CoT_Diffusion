@@ -61,3 +61,19 @@ runs/
 
 # Ignore local config overrides
 local_config.yaml
+
+# Evaluation results and logs
+eval_vcot_single.py
+outputs/
+diffusion_policy/outputs/
+eval_runner_logs/
+eval_videos/
+*.mp4
+
+# Existing ignore rules (keep these)
+data/
+datasets/
+wandb/
+__pycache__/
+*.ckpt
+*.pth
