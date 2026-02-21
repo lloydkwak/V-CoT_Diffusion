@@ -1,8 +1,14 @@
+# ==============================================================================
+# V-CoT Diffusion Policy - Requirements
+# ==============================================================================
+# Note: Do not blindly upgrade packages in the "Simulation & Robotics" section, 
+# as they are heavily dependent on legacy API structures (e.g., Gym < 0.26).
+
 # --- Core PyTorch & CUDA 12.1 ---
 --extra-index-url https://download.pytorch.org/whl/cu121
-torch>=2.3.0
-torchvision>=0.18.0
-torchaudio>=2.3.0
+torch>=2.1.0
+torchvision>=0.16.0
+torchaudio>=2.1.0
 
 # --- V-CoT Module (High-level Reasoning) ---
 # Pinning for Python 3.8 compatibility to avoid PEFT/Diffusers version hell
@@ -14,7 +20,7 @@ bitsandbytes
 sentencepiece
 protobuf
 
-# --- Diffusion Policy Module (Low-level Control) ---
+# --- Diffusion Policy Core (Low-level Control) ---
 dill
 hydra-core>=1.2
 hydra-colorlog
@@ -30,12 +36,21 @@ scikit-learn
 shapely
 networkx
 
-# --- Simulation & Robotics ---
+# --- Simulation & Robotics (CAUTION: Strictly Pinned Versions) ---
 mujoco>=3.1.0
 dm_control>=1.0.14
 robosuite==1.4.1
 robomimic
-gym==0.26.2
+
+# [CRITICAL FIX]
+# gym==0.24.1: Diffusion Policy expects `obs = env.reset()`. 
+# Gym >=0.26 returns a tuple `(obs, info)`, causing concatenation failures.
+gym==0.24.1
+
+# [CRITICAL FIX]
+# numpy==1.23.5: Gym 0.24.1 relies on legacy random generator methods.
+# NumPy >= 1.24 removes these methods, throwing `_generator_ctor` errors.
+numpy==1.23.5
 gymnasium
 
 # --- Data Visualization & Utilities ---
@@ -45,6 +60,3 @@ imageio[ffmpeg]
 opencv-python
 h5py
 numba
-
-# --- Legacy Compatibility ---
-numpy<2.0.0
