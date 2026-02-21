@@ -1,3 +1,0 @@
-[submodule "diffusion_policy"]
-	path = diffusion_policy
-	url = https://github.com/real-stanford/diffusion_policy.git
