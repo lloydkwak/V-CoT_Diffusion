@@ -29,14 +29,14 @@ venv/
 .env
 .venv/
 conda_env/
-.netrc           
+.netrc            
 
 # IDE settings
 .vscode/
 .idea/
 *.swp
 
-# Project Specific: Data & Large Files (Heavy)
+# Project Specific: Data & Large Files
 data/
 datasets/
 *.pkl
@@ -47,33 +47,27 @@ datasets/
 
 # Project Specific: Experiments, Logs & ML Artifacts
 experiments/outputs/
-wandb/           
-artifacts/       
+wandb/            
+artifacts/        
 runs/
 *.log
 *.pth
 *.ckpt
 *.safetensors
 *.onnx
+# Ignore Hydra run directories
+run-*/
+diffusion_policy/run-*/
 
 # Mac OS specific
 .DS_Store
 
-# Ignore local config overrides
-local_config.yaml
-
 # Evaluation results and logs
-eval_vcot_single.py
 outputs/
 diffusion_policy/outputs/
 eval_runner_logs/
 eval_videos/
 *.mp4
 
-# Existing ignore rules (keep these)
-data/
-datasets/
-wandb/
-__pycache__/
-*.ckpt
-*.pth
+# Scripts that shouldn't be in main repo (optional, but keeping it based on your request)
+# fix_dataset*.py

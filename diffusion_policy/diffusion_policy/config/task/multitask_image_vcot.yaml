@@ -1,0 +1,75 @@
+name: multitask_image_vcot
+
+# 1. Base shape_meta (Common for both)
+shape_meta: &shape_meta
+  obs:
+    agentview_image:
+      shape: [3, 84, 128]
+      type: rgb
+    robot0_eye_in_hand_image:
+      shape: [3, 84, 128]
+      type: rgb
+    robot0_eef_pos:
+      shape: [3]
+    robot0_eef_quat:
+      shape: [4]
+    robot0_gripper_qpos:
+      shape: [2]
+  action:
+    shape: [7]
+
+# 2. Dataset shape_meta (Includes subgoal for training)
+dataset_shape_meta: &dataset_shape_meta
+  obs:
+    agentview_image:
+      shape: [3, 84, 128]
+      type: rgb
+    robot0_eye_in_hand_image:
+      shape: [3, 84, 128]
+      type: rgb
+    robot0_eef_pos:
+      shape: [3]
+    robot0_eef_quat:
+      shape: [4]
+    robot0_gripper_qpos:
+      shape: [2]
+    subgoal:
+      shape: [3, 84, 128]
+      type: rgb
+  action:
+    shape: [7]
+
+dataset_path: 
+  - data/lift/ph/image.hdf5
+  - data/can/ph/image.hdf5
+  - data/square/ph/image.hdf5
+
+dataset:
+  _target_: diffusion_policy.dataset.vcot_multitask_dataset.VCoTMultiTaskDataset
+  dataset_paths: ${task.dataset_path}
+  shape_meta: *dataset_shape_meta
+  horizon: 16
+  pad_before: 1
+  pad_after: 7
+  seed: 42
+  val_ratio: 0.02
+  use_cache: False
+
+env_runner:
+  _target_: diffusion_policy.env_runner.robomimic_image_runner.RobomimicImageRunner
+  dataset_path: data/lift/ph/image.hdf5
+  shape_meta: *shape_meta
+  n_train: 0
+  n_train_vis: 0
+  n_test: 10
+  n_test_vis: 4
+  test_start_seed: 100000
+  max_steps: 400
+  n_obs_steps: 2
+  n_action_steps: 8
+  render_obs_key: 'agentview_image'
+  fps: 10
+  crf: 22
+  past_action: False
+  tqdm_interval_sec: 1.0
+  n_envs: null
