@@ -44,6 +44,7 @@ datasets/
 *.hdf5
 *.zarr
 *.npz
+*.jsonl
 
 # Project Specific: Experiments, Logs & ML Artifacts
 experiments/outputs/
@@ -55,19 +56,23 @@ runs/
 *.ckpt
 *.safetensors
 *.onnx
-# Ignore Hydra run directories
+.huggingface/
+
+# Ignore Hydra & WandB run directories
 run-*/
 diffusion_policy/run-*/
+tmp/
+temp/
 
 # Mac OS specific
 .DS_Store
 
-# Evaluation results and logs
+# Evaluation results and videos
 outputs/
 diffusion_policy/outputs/
 eval_runner_logs/
 eval_videos/
+videos/
 *.mp4
-
-# Scripts that shouldn't be in main repo (optional, but keeping it based on your request)
-# fix_dataset*.py
+*.avi
+*.gif
