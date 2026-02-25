@@ -111,7 +111,6 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
             trajectory = scheduler.step(
                 model_output, t, trajectory, 
                 generator=generator,
-                **kwargs
                 ).prev_sample
         
         # finally make sure conditioning is enforced

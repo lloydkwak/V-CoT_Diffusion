@@ -1,0 +1,128 @@
+_target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
+
+defaults:
+  - task: multitask_image_vcot
+  - _self_
+
+horizon: 16
+n_obs_steps: 2
+n_action_steps: 8
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+past_action_visible: False
+keypoint_visible_rate: 1.0
+obs_as_global_cond: True
+
+name: train_diffusion_unet_image_multitask_image_vcot
+exp_name: "vcot_cfg_final_v1"
+
+task:
+  dataset_obs_steps: ${dataset_obs_steps}
+  env_runner:
+    _target_: diffusion_policy.dataset.vcot_multitask_dataset.DummyRunner
+
+ema:
+  _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+policy:
+  _target_: diffusion_policy.policy.diffusion_unet_image_policy.DiffusionUnetImagePolicy
+  shape_meta: ${task.dataset_shape_meta}
+  obs_encoder:
+    _target_: diffusion_policy.model.vision.multi_image_obs_encoder.MultiImageObsEncoder
+    shape_meta: ${task.dataset_shape_meta}
+    rgb_model:
+      _target_: diffusion_policy.model.vision.model_getter.get_resnet
+      name: resnet18
+      weights: null
+    resize_shape: [84, 128]
+    crop_shape: [76, 116]
+    random_crop: True
+    use_group_norm: True
+    share_rgb_model: False
+    imagenet_norm: True
+  noise_scheduler:
+    _target_: diffusers.schedulers.scheduling_ddpm.DDPMScheduler
+    num_train_timesteps: 100
+    beta_start: 0.0001
+    beta_end: 0.02
+    beta_schedule: squaredcos_cap_v2
+    clip_sample: True
+    prediction_type: epsilon
+  horizon: ${horizon}
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  n_latency_steps: ${n_latency_steps}
+  obs_as_global_cond: ${obs_as_global_cond}
+
+dataloader:
+  batch_size: 64
+  num_workers: 8
+  shuffle: True
+  pin_memory: True
+  persistent_workers: True
+
+val_dataloader:
+  batch_size: 64
+  num_workers: 8
+  shuffle: False
+  pin_memory: True
+  persistent_workers: True
+
+training:
+  device: "cuda:0"
+  seed: 42
+  debug: False
+  resume: False
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  num_epochs: 100
+  gradient_accumulate_every: 1
+  use_ema: True
+  freeze_encoder: False 
+  val_every: 1
+  checkpoint_every: 10
+  sample_every: 50
+  rollout_every: 50
+  max_train_steps: null
+  max_val_steps: null
+  tqdm: True
+  tqdm_interval_sec: 1.0
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+
+logging:
+  project: diffusion_policy_multitask
+  resume: True
+  mode: online
+  name: ${exp_name}
+  tags: ["multitask", "vcot", "cfg"]
+
+checkpoint:
+  topk:
+    monitor_key: train_loss
+    mode: min
+    k: 5
+    format_str: 'epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
+
+multi_run:
+  run_dir: data/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  wandb_name_base: ${name}
+
+hydra:
+  run:
+    dir: data/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: data/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}

@@ -1,177 +1,201 @@
 import os
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
 import h5py
-import copy
-from torch.utils.data import ConcatDataset
-from diffusion_policy.model.common.normalizer import LinearNormalizer
+import torch
+import numpy as np
+import torchvision.transforms as T
 from diffusion_policy.dataset.base_dataset import BaseImageDataset
+from diffusion_policy.model.common.normalizer import LinearNormalizer
+from diffusion_policy.env_runner.base_image_runner import BaseImageRunner
 
-class RobomimicHDF5Dataset(BaseImageDataset):
-    def __init__(self, dataset_path, shape_meta, horizon=16, pad_before=1, pad_after=7, **kwargs):
+class VCoTMultitaskDataset(BaseImageDataset):
+    """
+    Multitask Dataset for Vision Chain-of-Thought (V-CoT) in Diffusion Policies.
+    
+    This dataset aggregates multiple offline demonstration datasets (HDF5 format) and 
+    structures them for conditional trajectory generation. It features:
+    1. Temporal windowing for observation history and action prediction horizons.
+    2. Extraction of full proprioceptive states (Position, Quaternion, Gripper).
+    3. Stochastic subgoal dropout for Classifier-Free Guidance (CFG).
+    4. Asymmetric visual augmentation to prevent overfitting to low-level textures.
+    """
+
+    def __init__(self, 
+                 file_paths, 
+                 n_obs_steps=2, 
+                 horizon=16, 
+                 max_subgoal_dist=50, 
+                 subgoal_drop_prob=0.2, 
+                 **kwargs):
+        """
+        Args:
+            file_paths (list): List of absolute paths to HDF5 dataset files.
+            n_obs_steps (int): Number of consecutive observation frames to use as context.
+            horizon (int): Length of the action trajectory to predict.
+            max_subgoal_dist (int): Maximum temporal distance (in steps) to sample a future subgoal.
+            subgoal_drop_prob (float): Probability of zeroing out the subgoal for CFG training.
+        """
         super().__init__()
-        self.dataset_path = os.path.abspath(dataset_path)
-        self.shape_meta = shape_meta
+        
+        self.file_paths = file_paths
+        self.n_obs_steps = n_obs_steps
         self.horizon = horizon
-        self.pad_before = pad_before
-        self.pad_after = pad_after
-        self.file = h5py.File(self.dataset_path, 'r')
+        self.max_subgoal_dist = max_subgoal_dist
+        self.subgoal_drop_prob = subgoal_drop_prob 
         
-        self.demos = list(self.file['data'].keys())
-        self.indices = [] 
-        for demo in self.demos:
-            num_steps = self.file[f'data/{demo}/actions'].shape[0]
-            for i in range(num_steps):
-                self.indices.append((demo, i))
+        # Visual augmentation pipeline for current observations
+        self.augmentor = T.Compose([
+            T.RandomCrop((80, 120)), 
+            T.Resize((84, 128)),     
+            T.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.1),
+        ])
+
+        self.indices = []
+        print(f"[Dataset] Initializing temporal indexing across {len(file_paths)} sources...")
+
+        for path in file_paths:
+            full_path = os.path.abspath(path)
+            if not os.path.exists(full_path):
+                print(f"  [Warning] Dataset file not found: {full_path}")
+                continue
+            
+            samples_in_file = 0
+            with h5py.File(full_path, 'r') as f:
+                if 'data' not in f: 
+                    continue
+                
+                for demo_id in f['data'].keys():
+                    demo_grp = f[f'data/{demo_id}']
+                    
+                    # Estimate trajectory length, accommodating datasets without explicit action keys
+                    if 'actions' in demo_grp:
+                        num_samples = len(demo_grp['actions'])
+                    elif 'obs/robot0_eef_pos' in demo_grp:
+                        num_samples = len(demo_grp['obs/robot0_eef_pos'])
+                    else:
+                        continue
+                        
+                    # Filter out trajectories shorter than the required temporal window
+                    if num_samples <= self.horizon + self.n_obs_steps:
+                        continue
+                    
+                    # Construct valid sliding windows
+                    for i in range(num_samples - self.horizon - self.n_obs_steps):
+                        self.indices.append((full_path, demo_id, i))
+                        samples_in_file += 1
+                        
+            print(f"  [Status] Loaded {samples_in_file} samples from: {full_path}")
         
-        self.n_steps = len(self.indices)
-        print(f"[*] Indexed {len(self.demos)} demos, {self.n_steps} steps from {dataset_path}")
+        print(f"[*] Total dataset size: {len(self.indices)} samples collected.\n")
 
     def __len__(self):
-        return self.n_steps
-
-    def _get_padded_sequence(self, dataset, step_id, total_steps):
-        # Calculate valid slice bounds
-        start_idx = max(0, step_id - self.pad_before)
-        end_idx = min(total_steps, step_id + self.horizon - self.pad_before)
-        
-        # Fetch clean slice from HDF5 (no duplicates)
-        val_slice = dataset[start_idx:end_idx]
-        
-        # Calculate padding lengths
-        pad_front = max(0, -(step_id - self.pad_before))
-        pad_back = max(0, (step_id + self.horizon - self.pad_before) - total_steps)
-        
-        # Apply padding in numpy (h5py is safe now)
-        if pad_front > 0:
-            front_pad = np.repeat(val_slice[0:1], pad_front, axis=0)
-            val_slice = np.concatenate([front_pad, val_slice], axis=0)
-        if pad_back > 0:
-            back_pad = np.repeat(val_slice[-1:], pad_back, axis=0)
-            val_slice = np.concatenate([val_slice, back_pad], axis=0)
-            
-        return val_slice
-
-    def __getitem__(self, idx):
-        demo_id, step_id = self.indices[idx]
-        demo_group = self.file[f'data/{demo_id}']
-        total_steps = demo_group['actions'].shape[0]
-        
-        obs_dict = {}
-        for key, attr in self.shape_meta['obs'].items():
-            if key == 'subgoal':
-                continue
-            
-            # Fetch and pad sequence safely
-            val_seq = self._get_padded_sequence(demo_group['obs'][key], step_id, total_steps)
-            obs_type = attr.get('type', 'low_dim')
-            
-            if obs_type == 'rgb':
-                if val_seq.dtype == np.uint8:
-                    val_seq = val_seq.astype(np.float32) / 255.0
-                elif val_seq.dtype != np.float32:
-                    val_seq = val_seq.astype(np.float32)
-                
-                # Convert (Horizon, H, W, C) -> (Horizon, C, H, W)
-                if val_seq.shape[-1] == 3:
-                    val_seq = np.transpose(val_seq, (0, 3, 1, 2))
-                    
-                # Auto-Resize
-                expected_shape = attr.get('shape', None)
-                if expected_shape is not None and val_seq.shape[1:] != tuple(expected_shape):
-                    val_t = torch.from_numpy(val_seq)
-                    val_t = F.interpolate(val_t, size=expected_shape[1:], mode='bilinear', align_corners=False, antialias=True)
-                    val_seq = val_t.numpy()
-                    
-            obs_dict[key] = val_seq
-
-        # Hindsight subgoal
-        offset = 5
-        if step_id < total_steps - (offset + 1):
-            goal_step = np.random.randint(step_id + offset, total_steps)
-        else:
-            goal_step = total_steps - 1
-            
-        subgoal = demo_group['obs']['agentview_image'][goal_step]
-        
-        if subgoal.dtype == np.uint8:
-            subgoal = subgoal.astype(np.float32) / 255.0
-        elif subgoal.dtype != np.float32:
-            subgoal = subgoal.astype(np.float32)
-            
-        if subgoal.shape[-1] == 3:
-            subgoal = np.transpose(subgoal, (2, 0, 1))
-            
-        expected_subgoal_shape = self.shape_meta['obs'].get('subgoal', {}).get('shape', None)
-        if expected_subgoal_shape is not None and subgoal.shape != tuple(expected_subgoal_shape):
-            subgoal_t = torch.from_numpy(subgoal).unsqueeze(0)
-            subgoal_t = F.interpolate(subgoal_t, size=expected_subgoal_shape[1:], mode='bilinear', align_corners=False, antialias=True)
-            subgoal = subgoal_t.squeeze(0).numpy()
-            
-        # Replicate subgoal across temporal horizon
-        subgoal_seq = np.stack([subgoal] * self.horizon, axis=0)
-        obs_dict['subgoal'] = subgoal_seq
-
-        # Action sequence
-        action_seq = self._get_padded_sequence(demo_group['actions'], step_id, total_steps)
-
-        return {
-            'obs': obs_dict, 
-            'action': action_seq
-        }
+        """Returns the total number of valid temporal sequences across all datasets."""
+        return len(self.indices)
 
     def get_normalizer(self, mode='limits', **kwargs):
-        data = {}
-        sample_limit = 50
-        sample_demos = self.demos[:sample_limit] if len(self.demos) > sample_limit else self.demos
+        """
+        Computes and returns a LinearNormalizer fitted to the dataset statistics.
+        Randomly samples a subset of the data to efficiently compute min/max limits.
+        """
+        data_cache = {
+            'robot0_eef_pos': [], 
+            'robot0_eef_quat': [], 
+            'robot0_gripper_qpos': [], 
+            'action': []
+        }
         
-        all_actions = []
-        for demo in sample_demos:
-            all_actions.append(self.file[f'data/{demo}/actions'][:])
-        data['action'] = np.concatenate(all_actions, axis=0)
+        # Stochastic sampling for efficient statistical fitting
+        sample_indices = np.random.choice(len(self.indices), min(10000, len(self.indices)), replace=False)
         
-        for key, attr in self.shape_meta['obs'].items():
-            if key == 'subgoal':
-                continue
-            if attr.get('type', 'low_dim') == 'low_dim':
-                all_low_dim = []
-                for demo in sample_demos:
-                    all_low_dim.append(self.file[f'data/{demo}/obs/{key}'][:])
-                data[key] = np.concatenate(all_low_dim, axis=0)
+        for idx in sample_indices:
+            path, demo_id, start_idx = self.indices[idx]
+            with h5py.File(path, 'r') as f:
+                demo = f[f'data/{demo_id}']
+                data_cache['robot0_eef_pos'].append(demo['obs/robot0_eef_pos'][start_idx])
+                data_cache['robot0_eef_quat'].append(demo['obs/robot0_eef_quat'][start_idx])
+                data_cache['robot0_gripper_qpos'].append(demo['obs/robot0_gripper_qpos'][start_idx])
+                data_cache['action'].append(demo['actions'][start_idx])
+                
+        data_dict = {
+            'robot0_eef_pos': np.array(data_cache['robot0_eef_pos']), 
+            'robot0_eef_quat': np.array(data_cache['robot0_eef_quat']), 
+            'robot0_gripper_qpos': np.array(data_cache['robot0_gripper_qpos']), 
+            'action': np.array(data_cache['action']),
+            # Dummy visual states to satisfy the normalizer's expected dictionary structure
+            'agentview_image': np.array([[0.0], [1.0]], dtype=np.float32), 
+            'subgoal': np.array([[0.0], [1.0]], dtype=np.float32)
+        }
         
         normalizer = LinearNormalizer()
-        normalizer.fit(data, last_n_dims=1, mode=mode, output_max=1.0, output_min=-1.0)
-        
-        for key, attr in self.shape_meta['obs'].items():
-            if attr.get('type', 'low_dim') == 'rgb' or key == 'subgoal':
-                normalizer.params_dict[key] = nn.ParameterDict({
-                    'offset': nn.Parameter(torch.zeros(1, dtype=torch.float32), requires_grad=False),
-                    'scale': nn.Parameter(torch.ones(1, dtype=torch.float32), requires_grad=False)
-                })
-        
+        normalizer.fit(data=data_dict, last_n_dims=1, mode=mode)
         return normalizer
 
-class VCoTMultiTaskDataset(BaseImageDataset):
-    def __init__(self, dataset_paths, shape_meta, horizon=16, pad_before=1, pad_after=7, **kwargs):
-        super().__init__()
-        
-        self.shape_meta = copy.deepcopy(shape_meta)
-        if 'subgoal' in self.shape_meta['obs']:
-            self.shape_meta['obs']['subgoal']['type'] = 'rgb'
+    def _process_image(self, img_array, augment=True):
+        """
+        Converts raw NumPy arrays to scaled PyTorch tensors (CHW format) 
+        and applies optional augmentations.
+        """
+        if img_array.shape[0] == 3: 
+            tensor = torch.from_numpy(img_array.copy()).float()
+        else: 
+            tensor = torch.from_numpy(img_array.copy()).float().permute(2, 0, 1)
             
-        self.datasets = [
-            RobomimicHDF5Dataset(p, self.shape_meta, horizon, pad_before, pad_after) 
-            for p in dataset_paths if os.path.exists(p)
-        ]
-        self.concat_dataset = ConcatDataset(self.datasets)
-
-    def __len__(self):
-        return len(self.concat_dataset)
+        if tensor.max() > 1.0: 
+            tensor /= 255.0
+            
+        if augment: 
+            return self.augmentor(tensor)
+        return T.Resize((84, 128))(tensor)
 
     def __getitem__(self, idx):
-        return self.concat_dataset[idx]
+        """
+        Retrieves a single training instance containing observation history, 
+        full proprioceptive state, target action sequence, and conditional subgoal.
+        """
+        path, demo_id, start_idx = self.indices[idx]
+        with h5py.File(path, 'r') as f:
+            demo = f[f'data/{demo_id}']
+            obs_dict = {}
+            
+            # 1. Visual Observations
+            imgs = demo['obs/agentview_image'][start_idx : start_idx + self.n_obs_steps]
+            obs_dict['agentview_image'] = torch.stack([self._process_image(img, augment=True) for img in imgs])
+            
+            # 2. Proprioceptive State (Pos, Quat, Gripper)
+            obs_dict['robot0_eef_pos'] = torch.from_numpy(demo['obs/robot0_eef_pos'][start_idx : start_idx + self.n_obs_steps]).float()
+            obs_dict['robot0_eef_quat'] = torch.from_numpy(demo['obs/robot0_eef_quat'][start_idx : start_idx + self.n_obs_steps]).float()
+            obs_dict['robot0_gripper_qpos'] = torch.from_numpy(demo['obs/robot0_gripper_qpos'][start_idx : start_idx + self.n_obs_steps]).float()
+            
+            # 3. Action Trajectory
+            actions = demo['actions'][start_idx : start_idx + self.horizon]
+            
+            # 4. Subgoal Conditioning with Classifier-Free Guidance (CFG)
+            total_samples = len(demo['actions'] if 'actions' in demo else demo['obs/robot0_eef_pos'])
+            subgoal_idx = np.random.randint(
+                start_idx + 1, 
+                min(start_idx + self.max_subgoal_dist, total_samples - 1) + 1
+            )
+            
+            # Apply unconditional dropout
+            if np.random.rand() < self.subgoal_drop_prob:
+                subgoal_img = torch.zeros((3, 84, 128))
+            else:
+                # Retain high-fidelity target image (no spatial/color jittering)
+                subgoal_img = self._process_image(demo['obs/agentview_image'][subgoal_idx], augment=False)
+            
+            obs_dict['subgoal'] = torch.stack([subgoal_img] * self.n_obs_steps)
+            
+        return {
+            'obs': obs_dict, 
+            'action': torch.from_numpy(actions).float()
+        }
 
-    def get_normalizer(self, mode='limits', **kwargs):
-        return self.datasets[0].get_normalizer(mode=mode)
+class DummyRunner(BaseImageRunner):
+    """
+    Headless runner utilized to bypass environment simulation rendering 
+    during offline policy training.
+    """
+    def __init__(self, output_dir=None, **kwargs): 
+        self.output_dir = output_dir
+        
+    def run(self, policy): 
+        return {}
