@@ -19,6 +19,9 @@ peft==0.13.2
 bitsandbytes
 sentencepiece
 protobuf
+# [ADDED] Required for VLM dataloading and efficient weight serialization
+datasets>=2.14.0
+safetensors
 
 # --- Diffusion Policy Core (Low-level Control) ---
 dill
