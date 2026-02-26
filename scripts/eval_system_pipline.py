@@ -51,7 +51,7 @@ REPLAN_STEPS = 8      # Execute 8 steps per DP inference (Temporal smoothing)
 VLM_FREQ = 24         # Update visual subgoal every 24 steps
 MAX_TOTAL_STEPS = 600 
 DP_GUIDANCE_SCALE = 1.2 
-VLM_INFERENCE_STEPS = 20
+VLM_INFERENCE_STEPS = 50
 
 # Task Suite
 TASK_CONFIGS = {
@@ -164,7 +164,8 @@ def main():
                 with torch.no_grad():
                     curr_subgoal_pil = vlm_pipe(prompt=prompt, image=Image.fromarray(live_img), 
                                               num_inference_steps=VLM_INFERENCE_STEPS, 
-                                              image_guidance_scale=1.5, guidance_scale=7.0).images[0]
+                                              image_guidance_scale=1.8,
+                                              guidance_scale=5.0).images[0]
                 curr_subgoal_t = preprocess_image(np.array(curr_subgoal_pil)).to(DEVICE)
 
             # 2. State Preparation
